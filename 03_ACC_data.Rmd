@@ -1,0 +1,158 @@
+---
+title: "03_ACC_data"
+author: "Clara Peiret-Garcia"
+date: "2023-08-28"
+output: html_document
+---
+
+# Introduction
+
+Collect the needed data for the accessibility analysis.
+- Amenities
+- Output areas + Population weighted centroids
+- Street networks
+- Elevation
+
+## Amenities
+
+```{r}
+# Libraries
+library(sfarrow)
+library(sf)
+library(ggplot2)
+library(raster)
+```
+
+
+```{r}
+# POIs
+# POIs were obtained from: https://digimap.edina.ac.uk/os
+
+# Select which POIs categories to keep
+pointx_class_filt <- c(01020013,01020034,01020043,02090141,02100156,
+                       02100776,03170813,03170248,03180814,03180255,
+                       04240293,04240302,04250308,04250312,04250315,
+                       05280364,05280365,05280369,05310379,05310375,
+                       09460656,09470661,09470662,09470669,09470705,
+                       09470705,09470819,09480674,09480763)
+
+# Load and filter POIs
+pois <- st_read_parquet('./data/pois_raw.parquet') %>% 
+  filter(pointx_class %in% pointx_class_filt)
+head(pois)
+
+```
+
+```{r}
+# Classify POIs based on the categories used for the TUS anlaysis.
+c('Care','Culture','Education','Leisure','Maintenance','Sports')
+
+pois$amenity_category <- ifelse(substr(pois$pointx_class, 1, 3) == "102", "Leisure",
+                               ifelse(substr(pois$pointx_class, 1, 1) == "2", "Maintenance",
+                                       ifelse(substr(pois$pointx_class, 1, 3) == "317", "Culture",
+                                               ifelse(substr(pois$pointx_class, 1, 3) == "318", "Sports",
+                                                      ifelse(substr(pois$pointx_class, 1, 3) == "424", "Sports",
+                                                             ifelse(substr(pois$pointx_class, 1, 7) == "4250308", "Culture",
+                                                                    ifelse(substr(pois$pointx_class, 1, 7) == "4250315", "Culture",
+                                                      ifelse(substr(pois$pointx_class, 1, 7) == "4250312", "Leisure",
+                                                             ifelse(substr(pois$pointx_class, 1, 3) == "528", "Care",
+                                                                     ifelse(substr(pois$pointx_class, 1, 3) == "531", "Education",
+                                                                            ifelse(substr(pois$pointx_class, 1, 1) == "9", "Maintenance",
+                                                                                                 "default_label")))))))))))
+
+```
+
+
+```{r}
+# Load access to green spaces
+green_spaces <- st_read("./data/GB_AccessPoint.shp") %>%
+  st_transform(., 4326)
+
+# Generate bounding box based on the other amenities.
+green_spaces_clip <- st_crop(green_spaces, st_bbox(pois))
+
+# Create column category
+green_spaces_clip$amenity_category = "Sports"
+```
+
+```{r}
+# Bind amenities with green spaces.
+# Keep only needed columns from amenities df
+pois <- pois %>% select(ref_no, amenity_category, geometry)
+green_spaces_clip <- green_spaces_clip %>%  filter(accessType == "Pedestrian") %>% 
+  select(id, amenity_category, geometry) %>% 
+  rename(ref_no = id)
+
+# Bind
+amenities <- rbind(pois, green_spaces_clip)
+
+# Save
+st_write_parquet(amenities, "./data/amenities.parquet")
+```
+
+## Output areas and Population weighted centroids
+```{r}
+# Output areas and population weighted centroids can be downloaded from: https://geoportal.statistics.gov.uk/
+oa <- st_read_parquet("./data/oa.parquet")
+pwc <- st_read_parquet("./data/pwc.parquet")
+
+# Visualise the study area on a map.
+pdf("./figures_paper/ACC_OAs.pdf", width = 11, height = 8.5, paper = "USr")
+
+ggplot() +
+  geom_sf(data = oa, aes(fill = 'Output Areas'), lwd = 0.4) +
+  geom_sf(data = pwc, aes(col = "Population weighted centroids"), size = 1) +
+  scale_fill_manual(values = c("#d8e2dc"), name = "") +
+  scale_colour_manual(values = c("black"), name = "") +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 12), legend.position = "bottom")  + # Adjust the font size as needed
+  ggtitle("Output Areas and population weigthed centroids in Newcastle upon Tyne")
+
+```
+
+## Street network
+
+```{r}
+# Clip PBF to study area
+
+bbox <- st_bbox(amenities)
+
+input <- '../data/england.osm.pbf'
+output <- '../data/street_ntw.pbf'
+system2('osmconvert', paste('{input} -b={bbox[[1]]},{bbox[[2]]},{bbox[[3]]},{bbox[[4]]} --drop-relations -o={output}'))
+```
+
+## Elevation
+
+```{r}
+# Get elevation data from https://land.copernicus.eu/imagery-in-situ/eu-dem/eu-dem-v1.1?tab=download
+url <- c('https://gisco-services.ec.europa.eu/dem/copernicus/outD/10_DEM_y50x-10.zip')
+
+temp <- tempfile()
+tempd <- tempdir()
+
+download.file(url, temp, mode = 'wb')
+unzip(temp, exdir = tempd)
+
+dem <- raster(file.path(tempd,'10_DEM_y50x-10.tif'))
+
+# Clip raster to study areas.
+dem_crop <- crop(dem, bbox)
+writeRaster(dem_crop, '../data/elevation.tiff','GTiff', overwrite = TRUE)
+
+```
+```{r}
+# Store elevation and street network inside a folder named 'pbf'
+dir.create('pbf')
+
+source <- "./data/street_ntw.pbf"
+destination <- "./pbf/street_ntw.pbf"
+file.rename(source, destination)
+
+source <- "../data/elevation.tiff"
+destination <- "../pbf/elevation.tiff"
+file.rename(source, destination)
+
+```
+
+

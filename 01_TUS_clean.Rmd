@@ -1,0 +1,88 @@
+---
+title: "01_TUS"
+author: "Clara Peiret-Garcia"
+date: "2023-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Analyse UK Time Use Survey to extract activity patterns.
+
+```{r}
+# Libraries ---------------------------------------------------------------
+
+library(haven)
+library(dplyr)
+library(tidyr)
+
+```
+
+
+```{r}
+# Load data ---------------------------------------------------------------
+
+tus <- read_dta('./data/uktus15_diary_ep_long.dta')
+activity_categories <- read.csv('./data/activity_categories.csv')
+```
+
+```{r}
+# Clean data --------------------------------------------------------------
+
+tus <- tus %>% 
+  # Keep only weekdays/school days
+  dplyr::filter(KindOfDay == 1 | KindOfDay == 2) %>% 
+  
+  # Create individual ids
+  dplyr::mutate(id = paste0(serial,pnum)) %>% 
+  dplyr::mutate(id_pd = paste0(serial,pnum,daynum)) %>% 
+  dplyr::select(id,id_pd,everything()) %>% 
+  
+  # Remove incomplete data
+  dplyr::filter(DMFlag != -6) %>% 
+  dplyr::filter(!WhereWhen %in% c(0,-9,-7,99)) %>% 
+  
+  # Add categories to activities
+  merge(activity_categories[,c('Code','Category')], by.x = 'whatdoing', by.y = 'Code')
+
+# Remove individuals who only stay in one location
+single_location <- tus %>% group_by(id_pd) %>%
+  summarise(distinct_loc = n_distinct(WhereWhen)) %>% 
+  filter(.$distinct_loc == 1)
+tus <- tus %>% dplyr::filter(!id_pd %in% single_location$id_pd)
+```
+
+
+
+```{r}
+# Calculate time spent per activity ---------------------------------------
+
+# Calculate behaviours
+behaviours <- tus %>% 
+  # Calculate time per activity
+  group_by(id_pd, Category) %>% 
+  summarise(time = sum(eptime)/1440) %>%
+  drop_na() %>% 
+  
+  # Make data wide
+  spread(., Category, time) %>% 
+  
+  # Replace NAs
+  replace(is.na(.),0)
+
+# Remove not needed data
+rm(activity_categories,tus,single_location)
+
+```
+
+```{r}
+# Save output to file
+
+write.csv(behaviours, './outputs/behaviours.csv', row.names = F)
+
+```
+

@@ -1,0 +1,256 @@
+---
+title: "02_TUS_SOM"
+author: "Clara Peiret-Garcia"
+date: "2023-08-25"
+output: html_document:
+  self_contained: no
+---
+
+## Introduction
+
+Calculate activity-based behaviours using Self-Organising Maps.
+
+```{r}
+# Libraries ---------------------------------------------------------------
+
+library(caret)
+library(factoextra)
+library(kohonen)
+library(tidyverse)
+library(RColorBrewer)
+library(gridExtra)
+library(ggplot2)
+library(ggpubr)
+
+```
+
+
+```{r}
+# Load data
+behaviours <- read.csv('./outputs/behaviours.csv')
+
+```
+
+```{r}
+# Prepare data
+# Normalise values between 0-1
+process <- preProcess(behaviours[,-c(1,5)], method=c('range'))
+norm_scale <- predict(process, behaviours[,-c(1,5)])
+
+# Add id column
+norm_scale$id_pd <- behaviours$id_pd
+norm_scale <- norm_scale %>% dplyr::select(id_pd, everything())
+
+# Generate matrix
+m <- as.matrix(norm_scale[-1])
+```
+
+```{r}
+# Estimate SOM model
+n = sqrt(5*sqrt(nrow(norm_scale))) # Grid dimensions
+grid <- somgrid(xdim = n, 
+                ydim = n, 
+                topo = 'hexagonal',
+                neighbourhood.fct = 'gaussian',
+                toroidal = T)
+
+# Estimate SOM model
+set.seed(42)
+som_model <- som(X = m,
+                 grid = grid,
+                 dist.fcts = 'manhattan',
+                 rlen = 2000)
+
+```
+
+```{r}
+# Define optimal number of clusters
+
+# WCSS = within cluster sum of squares
+# We employ first k-means clustering
+mydata = som_model$codes[[1]]
+wss = (nrow(mydata)-1)*sum(apply(mydata,2,var))
+for (i in 2:15) {
+  wss[i] = sum(kmeans(mydata, centers=i)$withinss)
+}
+par(mar=c(5.1,4.1,4.1,2.1))
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares", main="Within cluster sum of squares (WCSS)")
+
+```
+
+```{r}
+# Choose number of clusters
+n_clusters = 5
+
+# Results
+som_model_cluster <- cutree(hclust(dist(getCodes(som_model))), n_clusters)
+
+# Add nodes
+norm_scale$node_activity <- som_model$unit.classif
+
+# Join cluster to node
+x <- as.data.frame(som_model_cluster) %>%
+  rownames_to_column(.,'node_activity') %>%
+  mutate(node_activity = gsub('V','',node_activity))
+x$node_activity <- as.integer(x$node_activity)
+norm_scale <- left_join(norm_scale, x, by = 'node_activity')
+
+# Cluster column as factor
+norm_scale$som_model_cluster <- as.factor(norm_scale$som_model_cluster)
+
+results_som <- norm_scale[-1] %>% group_by(som_model_cluster) %>% 
+  dplyr::summarize_all(list(mean = mean)) %>% 
+  as.data.frame() %>% 
+  mutate(som_model_cluster = as.factor(som_model_cluster))
+
+# See what the results look like
+results_som
+```
+
+```{r}
+# Translate results into weights
+weights <- results_som[,c(2:8)]
+weights$cluster_name <- results_som$cluster_name
+
+# Rows to columns
+weights <- as.data.frame(t(weights))
+colnames(weights) <- weights[8,]
+weights <- weights[-8,]
+weights <- weights[,order(colnames(weights))]
+
+ranks_df <- apply(weights, 2, rank)
+ranks_df <- as.data.frame(ranks_df)
+names(ranks_df) <- 1:n_clusters
+print(ranks_df)
+```
+
+```{r}
+row.names(ranks_df) <- c("Care", "Culture", "Education", 
+                     "Leisure", "Maintenance", "Sports", "Work")
+
+# Cluster names
+names(ranks_df) <- c('Students', 'Active life', 'Work-life balance', 'Culture fans', 'Housekeepers')
+
+# Convert the data frame to long format
+data_long <- ranks_df %>%
+  mutate(Variable = row.names(ranks_df)) %>%
+  pivot_longer(cols = c('Students', 'Active life', 'Work-life balance', 'Culture fans', 'Housekeepers'), names_to = "Cluster", values_to = "Rank") %>%
+  arrange(Variable)
+
+write.csv(data_long, './outputs/weights.csv', row.names = FALSE)
+
+```
+
+
+```{r}
+# Plot names
+plot_names <- c('Students', 'Active life', 'Work-life balance', 'Culture fans', 'Housekeepers')
+pretty_palette <- c("#ffc2d1", '#b5e2fa', '#efc88b',  '#023e8a', '#D0F0C0')
+
+# X-axis labels
+x_labels <- c('Care', 'Culture', 'Education', 'Leisure', 'Maintenance', 'Outdoors activities', 'Work')
+
+# Create individual plots and aggregate them to list
+plots <- lapply(seq_along(plot_names), function(i) {
+  name <- plot_names[i]
+  category <- unique(data_long$Cluster)[which(plot_names == name)]
+  
+  ggplot(data_long %>% filter(Cluster == category), aes(x = Variable, y = Rank)) +
+    geom_bar(stat = "identity", aes(fill = name)) +
+    labs(title = name, x = NULL, y = "Rank") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title.y = element_text(size = 12, vjust = 0.5),
+          plot.title = element_text(size = 14, face = "bold"),
+          legend.position = "none",
+          panel.grid.major.y = element_blank()) +
+    scale_x_discrete(labels = x_labels) +
+    scale_fill_manual(values = pretty_palette[i])
+})
+
+# Display the plots
+#grid.arrange(grobs = plots, ncol = 2)
+plots <- ggarrange(plotlist = plots)
+
+pdf("./figures/TUS_barplots.pdf", width = 11, height = 8.5, paper = "USr")
+plots
+dev.off()
+```
+
+
+```{r}
+# Give names to the clusters
+results_som <- results_som %>%
+  mutate(cluster_name = case_when(som_model_cluster == 1 ~ 'Students',
+                                  som_model_cluster == 2 ~ 'Active life',
+                                  som_model_cluster == 3 ~ 'Work-life balance',
+                                  som_model_cluster == 4 ~ 'Culture fans',
+                                  som_model_cluster == 5 ~ 'Housekeepers'))
+
+# Observations per cluster
+obs_cluster <- norm_scale %>%
+  group_by(som_model_cluster) %>%
+  summarise(count = n())
+```
+
+```{r}
+# Additional SOM plots 
+
+# Changes plot.
+# Shows model convergence
+plot(som_model, type="changes")
+
+# Node counts
+# Shows the number of observations assigned to each node in the map.
+plot(som_model, type="count", main="Node Counts")
+
+# U-Matrix.
+# Shows the distance between each node and its neighbours.
+plot(som_model, type="dist.neighbours", main = "SOM neighbour distances")
+
+# Property plots
+# Show the distribution of the different variables across the SOM.
+property_plots <- list()
+plot_names <- c('Care','Culture','Education','Leisure','Maintenance','Sports','Work')
+
+pdf("./figures_paper/TUS_property.pdf", width = 11, height = 8.5, paper = "USr")
+par(mfrow = c(3,3))
+for (i in 1:7) {
+  plot(som_model,
+       type = 'property',
+       property = getCodes(som_model)[,i],
+       main = plot_names[i],
+       palette.name = viridis::viridis)
+}
+dev.off()
+
+```
+
+```{r}
+pretty_palette <- c("#ffc2d1", '#b5e2fa', '#efc88b',  '#023e8a', '#D0F0C0')
+som_cluster <- cutree(hclust(dist(som_model$codes[[1]])), 5) %>% as.matrix
+
+pdf("./figures/TUS_cluster_grid.pdf", width = 11, height = 8.5, paper = "USr")
+plot(som_model, type="mapping", bgcol = pretty_palette[som_cluster], 
+     main = "Clusters", pchs="", shape = 'straight') 
+legend(19,16, 
+       legend=c('Cluster 1',
+                'Cluster 2',
+                'Cluster 3',
+                'Cluster 4',
+                'Cluster 5'),
+       fill=c("#ffc2d1", '#b5e2fa', '#efc88b',  '#023e8a', '#D0F0C0'),
+       pch = 22,
+       col = NA,
+       bg = NA,
+       box.lwd = NA,
+       cex = 1.15)
+dev.off()
+
+```
+
+
+
+
+

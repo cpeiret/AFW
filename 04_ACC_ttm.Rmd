@@ -1,0 +1,79 @@
+---
+title: "04_ACC_ttm"
+author: "Clara Peiret-García"
+date: '2023-08-28'
+output: html_document
+---
+
+# Introduction
+Generate travel time matrix using r5r.
+
+```{r}
+# Libraries
+options(java.parameters = "-Xmx16G")
+library(r5r)
+library(sfarrow)
+library(arrow)
+```
+
+```{r}
+# Prepare data so it is in r5r format
+## First column must be an id column
+r5r_format <- function(df){
+  # Libraries
+  library(purrr)
+  library(dplyr)
+  library(sf)
+  
+  out <- df %>% 
+    # Calculate lon,lat columns
+    dplyr::mutate(lon = unlist(purrr::map(df$geometry,1)),
+                  lat = unlist(purrr::map(df$geometry,2))) %>%
+    # 2.3. Drop geometry
+    # st_drop_geometry() %>%
+    
+    # Rename id column
+    rename(id = colnames(df)[1])
+  return(out)
+}
+
+pwc <- st_read_parquet('../data/pwc.parquet')
+amenities <- st_read_parquet('../data/amenities.parquet')
+
+pwc <- r5r_format(pwc)
+amenities <- r5r_format(amenities)
+
+
+```
+
+```{r, results='hide'}
+# Calculate ttm
+
+# Set parameters
+mode <- c("WALK")
+max_walk_time <- Inf   # minutes
+max_trip_duration <- 300 # minutes
+departure_datetime <- as.POSIXct("13-05-2019 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# Set r5r
+path = '../pbf'
+r5r_core <- setup_r5(data_path = '../pbf', verbose = FALSE, overwrite = FALSE)
+```
+
+```{r}
+# Calculate ttm
+ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = pwc,
+                          destinations = amenities,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+head(ttm)
+
+# Save outputs to file
+dir.create('../outputs')
+write_parquet(ttm, '../outputs/ttm.parquet')
+```
+

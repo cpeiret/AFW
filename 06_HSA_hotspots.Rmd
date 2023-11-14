@@ -1,0 +1,364 @@
+---
+title: "06_HSA_hotspots"
+author: "Clara Peiret-Garcia"
+date: "2023-08-29"
+output: html_document
+---
+
+# Introduction
+Detect hot and cold-spots based on the accessibility indexes.
+
+```{r}
+# Libraries
+library(sf)
+library(sfdep)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(ggnewscale)
+library(ggspatial)
+library(ggpubr)
+
+```
+
+
+
+```{r}
+# Data
+scores_oa <- readRDS('./outputs/scores_oa.RData')
+```
+
+```{r}
+# Generate a function that performs the hot-spot analysis
+hs_analysis <- function(data, geometry_column, attribute_column) {
+  # Step 1: Create nb and wt columns
+  data <- data %>%
+    mutate(
+      nb = st_contiguity(!!rlang::sym(geometry_column)),
+      wt = st_weights(nb, allow_zero = TRUE)
+    )
+  
+  # Step 2: Calculate A_lag
+  data <- data %>%
+    mutate(
+      A_lag = st_lag(!!rlang::sym(attribute_column), nb, wt, allow_zero = TRUE)
+    )
+  
+  # Step 3: Calculate local G statistics
+  data <- data %>%
+    mutate(
+      gi = local_g_perm(!!rlang::sym(attribute_column), nb, wt, nsim = 500)
+    ) %>%
+    unnest(gi)
+  
+  # Step 4: Classify the outputs
+  data <- data %>%
+    dplyr::select(OA21CD, gi, p_folded_sim) %>%
+    mutate(
+      classification = case_when(
+        gi > 0 & p_folded_sim <= 0.01 ~ 'Hot spot - 99% Confidence',
+        gi > 0 & p_folded_sim <= 0.05 ~ 'Hot spot - 95% Confidence',
+        gi > 0 & p_folded_sim <= 0.1 ~ 'Hot spot - 90% Confidence',
+        gi < 0 & p_folded_sim <= 0.01 ~ 'Cold spot - 99% Confidence',
+        gi < 0 & p_folded_sim <= 0.05 ~ 'Cold spot - 95% Confidence',
+        gi < 0 & p_folded_sim <= 0.1 ~ 'Cold spot - 90% Confidence',
+        TRUE ~ 'Not significant'
+      ),
+      classification = factor(
+        classification,
+        levels = c('Hot spot - 99% Confidence',
+                   'Hot spot - 95% Confidence',
+                   'Hot spot - 90% Confidence',
+                   'Not significant',
+                   'Cold spot - 90% Confidence',
+                   'Cold spot - 95% Confidence',
+                   'Cold spot - 99% Confidence')
+      )
+    )
+  
+  return(data)
+}
+```
+
+# Hot-spot analysis for each scenario
+
+```{r}
+# Create an empty list to store the results
+hs_results <- list()
+
+# Iterate through each data frame in scores_oa
+for (i in 1:length(scores_oa)) {
+  result <- hs_analysis(data = scores_oa[[i]], 
+                        geometry_column = 'geometry', 
+                        attribute_column = 'A')
+  # Assign names to the hs_results elements
+  result_name <- names(scores_oa)[i]
+  hs_results[[result_name]] <- result
+}
+```
+
+# Visualise results
+
+```{r}
+hs_maps <- list()
+  for (i in 1:length(hs_results)) {
+    hs_maps[[i]] <- ggplot(data = hs_results[[i]], aes(fill=classification), lwd = NA, col = NA) +
+  geom_sf(lwd = 0, col = NA) +
+  theme_minimal() +
+  #theme(legend.position = 'none') +
+  scale_fill_brewer(type = 'div', palette = "Spectral", 'Classification') +
+  annotation_scale(style = "ticks", height = unit(0.15, "cm")) +
+  annotation_north_arrow(style = north_arrow_minimal, location = "tl", height = unit(0.75, "cm")) +
+  ggtitle(names(hs_results[i])) 
+  }
+
+#grid.arrange(grobs = hs_maps, ncol = 2)
+
+pdf("./figures_paper/HSA_maps.pdf", paper = "USr", height = 8.5, width = 11)
+ggarrange(plotlist = hs_maps, common.legend = TRUE, legend = "bottom")
+dev.off()
+```
+
+
+```{r}
+# Create stack plots
+# Transform crs
+transformed <- hs_results$Baseline
+
+rotate_data <- function(data, x_add = 0, y_add = 0) {
+
+  shear_matrix <- function(){ matrix(c(2, 1.2, 0, 1), 2, 2) }
+
+  rotate_matrix <- function(x){
+    matrix(c(cos(x), sin(x), -sin(x), cos(x)), 2,2)
+  }
+  data %>%
+    dplyr::mutate(
+      geometry = .$geometry * shear_matrix() * rotate_matrix(pi/20) + c(x_add, y_add)
+    )
+}
+
+# Plots
+x = 70.1
+color = 'gray40'
+custom_labels <- c('Very hot', 'Hot', 'Somewhat hot', 'Non-significant', 'Somewhat cold', 'Cold', 'Very cold')
+
+
+temp1 <- ggplot() +
+
+  # Students
+  geom_sf(data = hs_results$Students %>% rotate_data(),  aes(fill=classification), lwd = 0) +
+  scale_fill_brewer(type = 'div', palette = "Spectral", 'Classification') +
+  annotate("text", label='Students', x=x, y= 44.5, hjust = 0, color=color)
+
+
+temp2 <- temp1 +
+  new_scale_fill() +
+  new_scale_colour() +
+
+  # Active life
+
+  geom_sf(data = hs_results$`Active life` %>% rotate_data(y_add = 0.15),  aes(fill=classification), lwd = 0) +
+  annotate("text", label='Active life', x=x, y= 44.5 + 0.15 , hjust = 0, color=color) +
+
+  # Work-life balance
+  geom_sf(data = hs_results$`Work-life balance` %>% rotate_data(y_add = 0.3),  aes(fill=classification), lwd = 0) +
+  annotate("text", label='Work-life balance', x=x, y= 44.5 + 0.3 , hjust = 0, color=color) +
+
+  # Culture fans
+  geom_sf(data = hs_results$`Culture fans` %>% rotate_data(y_add = 0.45),  aes(fill=classification), lwd = 0) +
+  annotate("text", label='Culture fans', x=x, y= 44.5 + 0.45 , hjust = 0, color=color) +
+
+  # Housekeepers
+  geom_sf(data = hs_results$Housekeepers %>% rotate_data(y_add = 0.6),  aes(fill=classification), lwd = 0) +
+  annotate("text", label='Housekeepers', x=x, y= 44.5 + 0.6 , hjust = 0, color=color) +
+
+  scale_fill_brewer(type = 'div', palette = "Spectral", 'Classification') +
+  theme_void()
+
+temp2
+
+```
+
+
+# Hot-spot persistence
+We now want to analyse if there are areas that are consistently hot/cold-spots. We also want to see which areas are not considered hot/cold-spots under the baseline scenario, but show up as hot/cold-spots for the alternative scenarios.
+
+For the hot-spot persistence, we only consider the alternative scenarios, and not the baseline. 
+
+```{r}
+# Hot-spot persistence
+# Remove baseline scenario
+hs_results_b <- hs_results[-1]
+
+```
+
+```{r}
+# Combine all data frames into a single data frame
+combined_df <- bind_rows(hs_results_b, .id = "Scenario")
+
+# Custom function to calculate the mode
+calculate_mode <- function(x) {
+  uniq_x <- unique(x)
+  freq_x <- tabulate(match(x, uniq_x))
+  uniq_x[which.max(freq_x)]
+}
+
+# Group by observation and calculate mode and its frequency using the custom function
+result <- combined_df %>%
+  group_by(OA21CD) %>%
+  summarise(
+    mode_classification = calculate_mode(classification),
+    mode_frequency = max(tabulate(match(classification, calculate_mode(classification))))
+  )
+
+head(result)
+
+```
+
+```{r}
+# Convert classification belonging and frequency into a single variable
+
+result <- result %>% 
+  mutate(
+    class_numeric = case_when(
+      mode_classification %in% c("Hot spot - 99% Confidence") ~ 3,
+      mode_classification %in% c("Hot spot - 95% Confidence") ~ 2,
+      mode_classification %in% c("Hot spot - 90% Confidence") ~ 1,
+      mode_classification %in% c("Cold spot - 90% Confidence") ~ -1,
+      mode_classification %in% c("Cold spot - 95% Confidence") ~ -2,
+      mode_classification %in% c("Cold spot - 99% Confidence") ~ -3,
+      TRUE ~ 0
+    )
+  )
+
+# Now, multiply persistence value by the times that value occurs for each OA
+result$persistence_value <- result$class_numeric * result$mode_frequency
+
+# Normalise values from -1 to 1.
+min_value <- min(result$persistence_value)
+max_value <- max(result$persistence_value)
+
+result$norm_persistence_value <- 2 * (result$persistence_value - min_value) / (max_value - min_value) - 1
+
+
+```
+
+
+```{r}
+
+# Plot persistence
+p_persistence <- ggplot() +
+  geom_sf(data = result, aes(fill = persistence_value), lwd = NA) +
+  scale_fill_distiller(palette = "Spectral", "Persistence") +
+  theme_minimal() +
+  theme(legend.position = 'bottom') +
+  annotation_scale(style = "ticks", height = unit(0.15, "cm"), text_cex = 0.75) +
+  annotation_north_arrow(style = north_arrow_minimal, location = "tl", height = unit(0.75, "cm")) +
+  ggtitle("Hot-spot persistence across scenarios")
+  #theme(legend.text = element_text(size = 16),
+        #legend.title = element_text(size = 18))
+   
+```
+
+```{r}
+# Peristence compared to baseline scenario
+
+ggarrange(p1, p_persistence)
+
+```
+
+
+# Scenario comparison
+
+We want to know how much each individual scenario differs from the baseline. To do so, we transform the categorical classification of hotspots into a numerical classification, and calculate the numerical differences between both.
+
+```{r}
+
+# Create a new variable that transforms categorical values into numerical.
+hs_results <- lapply(hs_results, function(x){
+  x %>% 
+  mutate(classification_numeric = case_when(
+   classification %in% c("Hot spot - 99% Confidence") ~ 3,
+   classification %in% c("Hot spot - 95% Confidence") ~ 2,
+   classification %in% c("Hot spot - 90% Confidence") ~ 1,
+   classification %in% c("Cold spot - 90% Confidence") ~ -1,
+   classification %in% c("Cold spot - 95% Confidence") ~ -2,
+   classification %in% c("Cold spot - 99% Confidence") ~ -3,
+   TRUE ~ 0
+  )
+  )
+})
+
+# Calculate difference between each scenario and the baseline
+hs_results <- lapply(hs_results, function(x){
+  x %>%   mutate(dif_baseline = hs_results$Baseline$classification_numeric - x$classification_numeric) 
+})
+
+```
+
+## Explore results
+
+```{r}
+baseline_dif_maps <- list()
+  for (i in 2:length(hs_results)) {
+    baseline_dif_maps[[i]] <- ggplot(data = hs_results[[i]], aes(fill=dif_baseline), lwd = NA, col = "white") +
+  geom_sf(lwd = 0, col = 0) +
+  theme_minimal() +
+  #theme(legend.position = 'none') +
+  scale_fill_distiller(palette = "PiYG", direction = -1,"Difference with baseline") +
+  annotation_scale(style = "ticks", height = unit(0.15, "cm")) +
+  annotation_north_arrow(style = north_arrow_minimal, location = "tl", height = unit(0.75, "cm")) +
+  ggtitle(names(hs_results[i])) 
+  }
+
+baseline_dif_maps[[1]] <- NULL
+
+#grid.arrange(grobs = baseline_dif_maps, ncol = 2)
+#pdf("./figures_paper/HSA_baseline_dif.pdf", paper = "USr", height = 8.5, width = 11)
+ggarrange(plotlist = baseline_dif_maps, common.legend = TRUE, legend = "bottom", ncol = 3, nrow = 2)
+#dev.off()
+```
+
+```{r}
+# Do the same but for accessibility scores
+# Calculate difference between each scenario and the baseline
+scores_oa <- lapply(scores_oa, function(x){
+  x %>%   mutate(dif_baseline = scores_oa$Baseline$A - x$A) 
+})
+
+```
+
+```{r}
+# Map
+access_baseline_dif_maps <- list()
+  for (i in 2:length(scores_oa)) {
+    access_baseline_dif_maps[[i]] <- ggplot(data = scores_oa[[i]], aes(fill=dif_baseline), , lwd = NA, col = NA) +
+  geom_sf(lwd = 0, col = 0) +
+  theme_minimal() +
+  #theme(legend.position = 'none') +
+  scale_fill_viridis_c(option = "G", direction = -1,"Difference with baseline") +
+  annotation_scale(style = "ticks", height = unit(0.15, "cm")) +
+  annotation_north_arrow(style = north_arrow_minimal, location = "tl", height = unit(0.75, "cm")) +
+  ggtitle(names(hs_results[i])) 
+  }
+
+access_baseline_dif_maps[[1]] <- NULL
+
+ggarrange(plotlist = access_baseline_dif_maps, common.legend = TRUE, legend = "bottom")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

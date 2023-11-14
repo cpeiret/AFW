@@ -1,0 +1,266 @@
+---
+title: "05_ACC_cc"
+author: "Clara Peiret-Garcia"
+date: "2023-08-29"
+output: html_document
+---
+
+# Introduction
+Calculate cost to closest amenities.
+
+```{r}
+library(arrow)
+library(sfarrow)
+library(sf)
+library(fastDummies)
+library(dplyr)
+library(accessibility)
+library(data.table)
+library(knitr)
+library(gridExtra)
+library(ggplot2)
+library(ggspatial)
+library(ggpubr)
+
+```
+
+# Prepare data
+```{r}
+# Load data
+ttm <- read_parquet('./outputs/ttm.parquet')
+pois <- st_read_parquet('./data/amenities.parquet')
+pwc <- st_read_parquet('./data/pwc.parquet')
+oa <- st_read_parquet('./data/oa.parquet')
+```
+
+```{r}
+# Prepare land use data from POIs
+land_use <- dummy_cols(pois, select_columns = 'amenity_category')
+colnames(land_use) <- gsub(pattern = 'amenity_category_', replacement = '', colnames(land_use))
+land_use <- land_use %>% dplyr::select(-c('amenity_category')) %>% 
+  rename(id = ref_no) %>% 
+  st_as_sf()
+```
+# Cost to closest
+
+```{r}
+# Calculate cost to closest amenity
+amenities <- c("Care","Culture","Education","Leisure","Maintenance","Sports")
+cost_closest <- list()
+
+for (i in amenities) {
+  cost_closest[[i]] <- cost_to_closest(
+  travel_matrix = ttm,
+  land_use_data = land_use,
+  opportunity = i,
+  travel_cost = 'travel_time_p50',
+  n = 3,
+  group_by = character(0),
+  active = TRUE,
+  fill_missing_ids = TRUE
+)
+}
+
+```
+
+# Convert the list into a long data frame.
+```{r}
+# Convert list elements to data.tables with an additional "amenity" column
+cost_closest_long <- lapply(names(cost_closest), function(category) {
+  df <- cost_closest[[category]]
+  df[, cost_closest := category]
+  return(df)
+})
+
+# Bind all data.tables together
+cost_closest_long <- rbindlist(cost_closest_long)
+
+# Rename the columns
+setnames(cost_closest_long, c("id","travel_time_p50", "amenity"))
+
+```
+# Weights data frame
+```{r}
+weights <- read.csv('./outputs/weights.csv')
+
+# Add baseline scenario weights
+new_rows <- data.frame(Variable=c('Care','Culture','Education','Leisure','Maintenance','Sports','Work'),
+                       Cluster = c('Baseline','Baseline','Baseline','Baseline','Baseline','Baseline','Baseline'),
+                       Rank = c(3.5,3.5,3.5,3.5,3.5,3.5,3.5))
+                       #Rank = c(1,1,1,1,1,1,1))
+weights <- rbind(weights,new_rows)
+```
+
+
+# Calculate accessibility score for the different profiles.
+```{r}
+# Loop across scenarios
+scenarios <- c('Baseline','Students', 'Active life', 'Work-life balance', 'Culture fans', 'Housekeepers')
+maps <- list()
+scores_oa <- list()
+
+for (i in scenarios) {
+  scenario = i
+  df <- merge(cost_closest_long,weights %>% filter(Cluster == scenario), by.x = 'amenity', by.y = 'Variable')
+
+# multiply time * weights
+  score <- df %>%
+    group_by(id) %>%
+    summarize(log_sum_travel_time = log(sum(travel_time_p50*Rank)))
+    
+  # Standardise
+  score$T <- (score$log_sum_travel_time - min(score$log_sum_travel_time)) / (max(score$log_sum_travel_time) - min(score$log_sum_travel_time))
+  
+  # Calculate accessibility sore A
+  score$A = 1 - score$T
+    
+  # Merge with PWC and OA
+  score_pwc <- merge(score, pwc, by = 'id')
+  score_oa <- merge(score_pwc, oa, by.x = 'OA21CD', by.y = 'OA21CD')
+  score_oa <- dplyr::select(score_oa,'OA21CD','id','log_sum_travel_time','T','A','geometry.y') %>% 
+    rename(geometry = geometry.y)
+  score_oa <- st_as_sf(score_oa)
+  scores_oa[[i]] <- score_oa
+  
+  # Map
+  maps[[i]] <- ggplot() +
+    geom_sf(data = score_oa, aes(fill = A), lwd = NA) +
+    scale_fill_viridis_c('Accessibility score') +
+    annotation_scale(style = "ticks", height = unit(0.12, "cm")) +
+    annotation_north_arrow(style = north_arrow_minimal, location = "tl", height = unit(0.75, "cm")) +
+    theme_minimal() +
+    ggtitle(scenario)
+}
+
+# Display the plots
+plots <- ggarrange(plotlist = maps, common.legend = T, legend = 'bottom')
+
+# Save to PDF
+#pdf("./figures_paper/ACC_scores.pdf", paper = "USr", height = 8.5, width = 11)
+plots
+#dev.off()
+
+
+```
+
+
+```{r}
+# Save results
+saveRDS(scores_oa, './outputs/scores_oa.RData')
+```
+
+
+# General EDA for accessibility results
+
+```{r}
+# Cumulative access function for each amenity type.
+# Colour palette
+
+#pdf("./figures_paper/ACC_CAF.pdf", paper = "USr", height = 8.5, width = 11)
+
+ggplot(cost_closest_long, aes(travel_time_p50, col = amenity)) +
+  stat_ecdf(lwd = 1, geom = "line") +
+  scale_colour_manual('Amenity',
+                      values = c("#264653","#2a9d8f","#8AB17D","#E9C46A","#F4A261","#E76F51")) +
+  theme_minimal() +
+  labs(x = 'Travel time (minutes)',
+       y = 'Proportion of origins') +
+  geom_vline(xintercept = 15,  linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = 30,  linetype = "dashed", color = "gray") +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 12))
+dev.off()
+
+```
+
+
+```{r}
+# Create density plots
+pretty_palette <- c("gray","#ffc2d1", '#b5e2fa', '#efc88b',  '#023e8a', '#D0F0C0')
+p_values <- c("N/A","0.000","0.000","0.068","0.000","0.000")
+
+density_plots <- list()
+for (i in 1:length(scores_oa)) {
+  density_plots[[i]] <- ggplot(data = scores_oa[[i]], aes(x = A)) +
+    geom_density(fill = pretty_palette[i], alpha = 0.5, size = NA) +
+    geom_vline(aes(xintercept = mean(A), linetype = "Scenario average")) +
+    geom_vline(aes(xintercept = mean(scores_oa[[1]]$A), linetype = "Baseline average"), size = 0.4) +
+    annotate("text", x = 0.1, y = 3, label = paste0("P-value = ", p_values[i])) +
+    theme_minimal() +
+    ggtitle(names(scores_oa[i])) +
+    labs(x = 'Accessibility score', y = 'Density') +
+    scale_linetype_manual("", values = c("solid", "dotted"), 
+                          labels = c("Baseline average", "Scenario average")) +
+    theme(legend.position = "top")
+}
+
+#pdf("./figures_paper/ACC_density.pdf", paper = "USr", height = 8.5, width = 11)
+
+# Display the plots arranged in a grid
+grid.arrange(grobs = density_plots, ncol = 2)
+
+#dev.off()
+```
+
+
+# Calculate significance of differences between baseline and scenario
+```{r}
+# Compare whether accessibility means are different across scenarios.
+# Calculate the mean of column A in the first data frame
+baseline_mean <- mean(scores_oa[[1]]$A)
+
+# Perform t-tests for each data frame against the first data frame
+t_test_results <- list()
+
+for (i in 2:length(scores_oa)) {
+  t_test_result <- t.test(scores_oa[[i]]$A, mu = baseline_mean)
+  t_test_results[[i]] <- list(DataFrame = names(scores_oa[i]), p_value = t_test_result$p.value)
+}
+
+# Display the t-test results
+t_test_results
+
+```
+
+
+```{r}
+# Calculate the mean of column A in the first data frame
+baseline_mean <- mean(scores_oa[[1]]$A)
+
+# Perform t-tests for each data frame against the first data frame
+t_test_results <- data.frame(
+  Scenario = character(),
+  Mean_A = numeric(),
+  SD_A = numeric(),
+  Statistic = numeric(),
+  DF = numeric(),
+  PValue = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 2:length(scores_oa)) {
+  t_test_result <- t.test(scores_oa[[i]]$A, mu = baseline_mean)
+  t_test_results <- rbind(
+    t_test_results,
+    data.frame(
+      Scenario = names(scores_oa[i]),
+      Mean_A = round(mean(scores_oa[[i]]$A),3),
+      SD_A = round(sd(scores_oa[[i]]$A),3),
+      Statistic = round(t_test_result$statistic,3),
+      DF = t_test_result$parameter,
+      PValue = round(t_test_result$p.value,3)
+    )
+  )
+}
+
+# Print the t-test results as a formatted table
+kable(
+  t_test_results,
+  caption = "T-Test Results and Summary Statistics: Comparison with Baseline Mean",
+  format = "latex",
+  booktabs = TRUE
+)
+```
+
+
+
